@@ -115,6 +115,11 @@ function age(epoch) {
   return `${Math.floor(s / 86400)}d`;
 }
 
+function ago(epoch) {
+  const a = age(epoch);
+  return a === "now" ? "just now" : `${a} ago`;
+}
+
 function projectOf(cwd) {
   const r = spawnSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8", windowsHide: true });
   return path.basename(r.status === 0 ? r.stdout.trim() : cwd);
@@ -130,13 +135,65 @@ function agentName() {
   return "you";
 }
 
+// Where the agent runs: the tab name in the Herdr desktop app (herdr-core tells
+// each terminal its id), or the workspace label in the herdr terminal app.
 function workspaceLabel() {
+  if (process.env.HC_TERMINAL_ID) {
+    const r = spawnSync("hc", ["ls", "--json"], { encoding: "utf8", timeout: 4000, windowsHide: true });
+    try {
+      const where = JSON.parse(r.stdout).terminals.find((t) => t.address === process.env.HC_TERMINAL_ID)?.where || "";
+      return where.split(" / ").pop();
+    } catch {
+      return "";
+    }
+  }
   if (!inHerdr() || !process.env.HERDR_WORKSPACE_ID) return "";
   try {
     return JSON.parse(herdr(["workspace", "get", process.env.HERDR_WORKSPACE_ID]) || "{}").result?.workspace?.label || "";
   } catch {
     return "";
   }
+}
+
+function agentLabel(by) {
+  if (by) return by;
+  const where = workspaceLabel();
+  return where ? `${agentName()} · ${where}` : agentName();
+}
+
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// One agent at a time may change an item: a lock folder can be created by only
+// one process, on every system. A lock older than 10 seconds is left over from
+// a crash and is taken over.
+function withLock(id, fn) {
+  const lock = path.join(ITEMS, `.lock-${id}`);
+  for (let tries = 0; ; tries++) {
+    try {
+      fs.mkdirSync(lock);
+      break;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > 10000) { fs.rmSync(lock, { recursive: true, force: true }); continue; }
+      } catch {
+        continue;
+      }
+      if (tries > 100) die(`item ${id} is busy, try again`);
+      sleepMs(30);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+function isMine(item, label) {
+  return !item.for || label.toLowerCase().includes(item.for.toLowerCase());
 }
 
 // ---------- commands ----------
@@ -156,23 +213,27 @@ function parseFlags(args, flags) {
 function cmdAdd(args) {
   const { values, rest } = parseFlags(args, {
     "-p": { name: "project" }, "--project": { name: "project" },
-    "-n": { name: "note" }, "--note": { name: "note" },
+    "-n": { name: "note" }, "--note": { name: "note" }, "-b": { name: "note" }, "--brief": { name: "note" },
+    "--for": { name: "for" },
     "--by": { name: "by" },
   });
   const text = rest.join(" ").trim();
-  if (!text) die('usage: later add "what to do" [--project name] [--note "why"]');
+  if (!text) die('usage: later add "what to do" [--project name] [--brief "what, where, done when"] [--for agent]');
 
   const item = {
     id: newId(),
     text,
     project: values.project || projectOf(process.cwd()),
     note: values.note || "",
+    for: values.for || "",
     addedBy: values.by || agentName(),
     workspace: workspaceLabel(),
     pane: process.env.HERDR_PANE_ID || "",
     cwd: process.cwd(),
     created: Math.floor(Date.now() / 1000),
     status: "open",
+    takenBy: null,
+    takenAt: null,
     doneAt: null,
   };
   saveItem(item);
@@ -185,11 +246,15 @@ function cmdAdd(args) {
 }
 
 function setStatus(ref, status) {
-  const item = resolve(ref);
-  item.status = status;
-  item.doneAt = status === "done" ? Math.floor(Date.now() / 1000) : null;
-  saveItem(item);
-  return item;
+  const { id } = resolve(ref);
+  return withLock(id, () => {
+    const item = resolve(id);
+    item.status = status;
+    item.doneAt = status === "done" ? Math.floor(Date.now() / 1000) : null;
+    if (status === "open") { item.takenBy = null; item.takenAt = null; }
+    saveItem(item);
+    return item;
+  });
 }
 
 function cmdStatus(args, status) {
@@ -198,6 +263,63 @@ function cmdStatus(args, status) {
     const item = setStatus(ref, status);
     console.log(`${status} ${item.id}  ${item.text}`);
   }
+}
+
+function printItem(i) {
+  console.log(`${i.id}  ${i.text}`);
+  console.log(`  project: ${i.project}    folder: ${i.cwd}`);
+  console.log(`  status: ${i.status === "progress" ? `in progress · ${i.takenBy} (taken ${ago(i.takenAt)})` : i.status}${i.for ? `    for: ${i.for}` : ""}`);
+  console.log(`  added by: ${[i.addedBy, i.workspace].filter(Boolean).join(" · ")}, ${ago(i.created)}`);
+  if (i.note) console.log(`  brief: ${i.note}`);
+}
+
+function cmdShow(args) {
+  if (args.length === 0) die("usage: later show <id>");
+  for (const ref of args) printItem(resolve(ref));
+}
+
+// Marks an item in progress for this agent. Refuses an item that is done or
+// that another agent has, so two agents never work on the same one.
+function cmdTake(args) {
+  const { values, rest } = parseFlags(args, { "--by": { name: "by" } });
+  if (rest.length !== 1) die('usage: later take <id> [--by "agent · tab"]');
+  const label = agentLabel(values.by);
+  const { id } = resolve(rest[0]);
+  const { item, refused } = withLock(id, () => {
+    const i = resolve(id);
+    if (i.status === "done") return { refused: `${i.id} is already done` };
+    if (i.status === "progress" && i.takenBy !== label) return { refused: `${i.id} is in progress · ${i.takenBy} (taken ${ago(i.takenAt)})` };
+    i.status = "progress";
+    i.takenBy = label;
+    i.takenAt = Math.floor(Date.now() / 1000);
+    saveItem(i);
+    return { item: i };
+  });
+  if (refused) die(refused);
+  console.log(`taken ${item.id} by ${label}`);
+  if (!isMine(item, label)) console.log(`note: this item is for ${item.for}`);
+  printItem(item);
+}
+
+function cmdUnassign(args) {
+  if (args.length === 0) die("usage: later unassign <id>...");
+  for (const ref of args) {
+    const item = setStatus(ref, "open");
+    console.log(`unassigned ${item.id}  ${item.text} (open again)`);
+  }
+}
+
+function copyToClipboard(text) {
+  const tries = IS_WINDOWS ? [["clip", []]]
+    : process.platform === "darwin" ? [["pbcopy", []]]
+    : [["wl-copy", []], ["xclip", ["-selection", "clipboard"]], ["xsel", ["--clipboard", "--input"]]];
+  return tries.some(([cmd, a]) => spawnSync(cmd, a, { input: text, windowsHide: true }).status === 0);
+}
+
+function cmdCopy(args) {
+  const item = resolve(args[0]);
+  if (!copyToClipboard(item.id)) die("no clipboard program found");
+  console.log(`copied ${item.id}`);
 }
 
 function cmdRm(args) {
@@ -214,13 +336,18 @@ function cmdList(args) {
     "-a": { name: "all", boolean: true }, "--all": { name: "all", boolean: true },
     "-p": { name: "project" }, "--project": { name: "project" },
     "--here": { name: "here", boolean: true },
+    "--available": { name: "available", boolean: true },
     "--json": { name: "json", boolean: true },
   });
   const project = values.here ? projectOf(process.cwd()) : values.project;
-  const items = readItems().filter((i) => (values.all || i.status === "open") && (!project || i.project === project));
+  const label = values.available ? agentLabel() : "";
+  const items = readItems().filter((i) =>
+    (values.all || i.status !== "done") &&
+    (!project || i.project === project) &&
+    (!values.available || (i.status === "open" && isMine(i, label))));
 
   if (values.json) return console.log(JSON.stringify(items, null, 2));
-  if (items.length === 0) return console.log("nothing for later");
+  if (items.length === 0) return console.log(values.available ? "nothing available for you" : "nothing for later");
 
   let last = null;
   for (const i of items) {
@@ -230,13 +357,15 @@ function cmdList(args) {
       last = i.project;
     }
     const where = [i.addedBy, i.workspace, age(i.created)].filter(Boolean).join(" · ");
-    console.log(`  ${i.status === "done" ? "[x]" : "[ ]"} ${i.id}  ${i.text}  (${where})`);
+    const box = i.status === "done" ? "[x]" : i.status === "progress" ? "[~]" : "[ ]";
+    const state = [i.status === "progress" ? `in progress · ${i.takenBy}` : "", i.for ? `for ${i.for}` : ""].filter(Boolean).join(", ");
+    console.log(`  ${box} ${i.id}  ${i.text}  (${where})${state ? `  [${state}]` : ""}`);
     if (i.note) console.log(`         ${i.note}`);
   }
 }
 
 function cmdCount() {
-  process.stdout.write(`☐ ${readItems().filter((i) => i.status === "open").length} later`);
+  process.stdout.write(`☐ ${readItems().filter((i) => i.status !== "done").length} later`);
 }
 
 // ---------- the pane: a live list ----------
@@ -257,8 +386,10 @@ function cmdPane() {
 
   function render() {
     const items = readItems();
-    const visible = items.filter((i) => showDone || i.status === "open");
-    const open = items.filter((i) => i.status === "open").length;
+    const rank = { progress: 0, open: 1, done: 2 };
+    const visible = items.filter((i) => showDone || i.status !== "done")
+      .sort((a, b) => a.project.localeCompare(b.project) || rank[a.status] - rank[b.status] || a.created - b.created);
+    const open = items.filter((i) => i.status !== "done").length;
     const width = Math.max(20, (out.columns || 80) - 6);
     selectable = visible.map((i) => i.id);
     cursor = Math.min(Math.max(cursor, 0), Math.max(selectable.length - 1, 0));
@@ -275,16 +406,18 @@ function cmdPane() {
         last = i.project;
       }
       const selected = n === cursor;
-      const box = i.status === "done" ? `${C.green}☑${C.reset}` : "☐";
+      const box = i.status === "done" ? `${C.green}☑${C.reset}` : i.status === "progress" ? `${C.yellow}◐${C.reset}` : "☐";
       const style = (i.status === "done" ? C.dim : "") + (selected ? C.bold : "");
-      const where = [i.id, i.addedBy, i.workspace, age(i.created)].filter(Boolean).join(" · ");
+      const where = [i.id, i.addedBy, i.workspace, age(i.created)].filter(Boolean).join(" · ")
+        + (i.status === "progress" ? ` · in progress · ${i.takenBy} ${age(i.takenAt)}` : "")
+        + (i.for ? ` · for ${i.for}` : "");
       lines.push(`${selected ? `${C.yellow}›${C.reset}` : " "} ${box} ${style}${cut(i.text, width)}${C.reset}`);
       lines.push(`      ${C.dim}${cut(where, width - 6)}${C.reset}`);
     });
     lines.push("");
     lines.push(confirm
       ? `${C.yellow}Remove ${confirm}? y / n${C.reset}`
-      : `${C.dim}j/k move · x done · d remove · a ${showDone ? "hide" : "show"} done · q close${C.reset}`);
+      : `${C.dim}j/k move · x done · u unassign · d remove · a ${showDone ? "hide" : "show"} done · q close${C.reset}`);
     out.write("\x1b[H\x1b[2J" + lines.join("\n"));
   }
 
@@ -307,6 +440,7 @@ function cmdPane() {
     }
     if (str === "j" || key.name === "down") cursor++;
     else if (str === "k" || key.name === "up") cursor--;
+    else if (str === "u" && current && readItems().find((i) => i.id === current)?.status === "progress") setStatus(current, "open");
     else if ((str === "x" || key.name === "space") && current) {
       setStatus(current, readItems().find((i) => i.id === current)?.status === "done" ? "open" : "done");
     } else if (str === "d" && current) confirm = current;
@@ -492,10 +626,13 @@ function cmdUninstall() {
 function usage() {
   console.log(`later: the work you and your agents agreed to do later, in one list for every herdr workspace.
 
-  later add "text" [--project name] [--note "why"]   add an item (project: the git repository here)
-  later list [--all] [--here | --project name] [--json]
+  later add "text" [--project name] [--brief "what, where, done when"] [--for agent]
+  later list [--all] [--here | --project name] [--available] [--json]
+  later show <id>           the whole item, with its brief
+  later take <id> [--by n]  mark it in progress for this agent (refused if another agent has it)
+  later unassign <id>...    open again, so any agent can take it
   later done <id>...        mark done          later reopen <id>...   open again
-  later rm <id>...          remove
+  later copy <id>           copy the id        later rm <id>...       remove
   later count               the open count, for the tab bar
   later pane                the live list (herdr shows it as a pane or with prefix+t)
   later setup               set up this computer again, config.toml included
@@ -510,6 +647,10 @@ switch (command) {
   case "list": case "ls": cmdList(args); break;
   case "done": cmdStatus(args, "done"); break;
   case "reopen": cmdStatus(args, "open"); break;
+  case "show": cmdShow(args); break;
+  case "take": cmdTake(args); break;
+  case "unassign": cmdUnassign(args); break;
+  case "copy": cmdCopy(args); break;
   case "rm": case "remove": cmdRm(args); break;
   case "count": cmdCount(); break;
   case "pane": cmdPane(); break;
