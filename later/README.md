@@ -9,17 +9,17 @@ While you talk to an agent, you often agree that something is for another day: a
 ```
 ☐ Later  3 open · all workspaces
 
+api-service
+› ◐ Write the migration for the orders table
+      3bc9 · claude · Backend · 1d · in progress · codex · Database
+  ☐ Cap JSON request bodies above 32 MB
+      ff63 · claude · Backend · 2h · context
+
 web-app
   ☐ Show the order history on the profile page
-      682d · claude · Frontend · 2h
+      682d · claude · Frontend · 5d · context
 
-api-service
-› ☐ Write the migration for the orders table
-      3bc9 · claude · Backend · 1d
-  ☐ Cap JSON request bodies above 32 MB
-      ff63 · codex · Database · 5d
-
-j/k move · x done · d remove · a show done · q close
+j/k move · x done · u unassign · d remove · a show done · q close
 ```
 
 ## Install
