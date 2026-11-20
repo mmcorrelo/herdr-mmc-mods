@@ -30,6 +30,10 @@ herdr plugin install mmcorrelo/herdr-mmc-mods/later
 
 Restart herdr, and it works. macOS, Linux and Windows; it needs Node.js 18 or later on your `PATH`.
 
+## Agents doing the to-dos
+
+Tell an agent **"pick a to-do"**: it lists the open items of its repository, proposes one and says why, and takes it only after you say yes. Or name one: **"do later item 8a70"**. When it finishes it marks the item done; when it stops early it unassigns it.
+
 ## Use
 
 - **`prefix+t`** opens the list as a popup. Press `q` to close it.
@@ -37,7 +41,7 @@ Restart herdr, and it works. macOS, Linux and Windows; it needs Node.js 18 or la
 - **`☐ 3 later`** in the tab bar shows the open count (see *What it sets up*).
 - Tell your agent "add that to later", or just agree to leave something for later: Claude Code and Codex agents know when to add an item.
 
-In the list: `j`/`k` or the arrows move, `x` marks done (or open again), `d` removes, `a` shows or hides done items, `q` closes.
+In the list: `j`/`k` or the arrows move, `x` marks done (or open again), `u` unassigns an item in progress, `d` removes, `a` shows or hides done items, `q` closes.
 
 ## How it works
 
@@ -70,11 +74,14 @@ Every line it adds ends with `# mmc.later`. If you remove them, they stay remove
 ## Commands
 
 ```
-later add "text" [--project name] [--note "why"] [--by name]
-later list [--all] [--here | --project name] [--json]
-later done <id>...     later reopen <id>...     later rm <id>...
-later count            later pane
+later add "text" [--project name] [--brief "what, where, done when"] [--for agent] [--by name]
+later list [--all] [--here | --project name] [--available] [--json]
+later show <id>        later take <id> [--by name]     later unassign <id>...
+later done <id>...     later reopen <id>...            later rm <id>...
+later copy <id>        later count                     later pane
 later setup            later uninstall
 ```
+
+`take` marks an item in progress for the agent that runs it and is refused when another agent already has it, so two agents never work on the same item (a lock makes this safe when they try at the same moment). `unassign` makes it open again. `list --available` shows the open items that are not assigned to another agent with `--for`.
 
 An id can be shortened to any unique prefix. `LATER_HOME` moves the item folder, for example to try the mod without touching your list.
