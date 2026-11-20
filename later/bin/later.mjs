@@ -88,6 +88,20 @@ function readItems() {
   return items.sort((a, b) => a.project.localeCompare(b.project) || a.created - b.created);
 }
 
+const CONTEXT_LIMIT = 64 * 1024;
+
+function contextFile(id) {
+  return path.join(ITEMS, `${id}.md`);
+}
+
+function readContext(id) {
+  try {
+    return fs.readFileSync(contextFile(id), "utf8");
+  } catch {
+    return "";
+  }
+}
+
 function saveItem(item) {
   writeAtomic(path.join(ITEMS, `${item.id}.json`), JSON.stringify(item, null, 2) + "\n");
 }
@@ -123,6 +137,10 @@ function ago(epoch) {
 function projectOf(cwd) {
   const r = spawnSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8", windowsHide: true });
   return path.basename(r.status === 0 ? r.stdout.trim() : cwd);
+}
+
+function sessionId() {
+  return process.env.CLAUDE_CODE_SESSION_ID || "";
 }
 
 function agentName() {
@@ -216,9 +234,23 @@ function cmdAdd(args) {
     "-n": { name: "note" }, "--note": { name: "note" }, "-b": { name: "note" }, "--brief": { name: "note" },
     "--for": { name: "for" },
     "--by": { name: "by" },
+    "--session": { name: "session", boolean: true },
+    "--context-file": { name: "contextFile" },
   });
   const text = rest.join(" ").trim();
-  if (!text) die('usage: later add "what to do" [--project name] [--brief "what, where, done when"] [--for agent]');
+  if (!text) die('usage: later add "what to do" [--project name] [--brief "…"] [--context-file file|-] [--session] [--for agent]');
+
+  let context = "";
+  if (values.contextFile) {
+    try {
+      context = fs.readFileSync(values.contextFile === "-" ? 0 : values.contextFile, "utf8").trim();
+    } catch (e) {
+      die(`could not read the context: ${e.message}`);
+    }
+    if (Buffer.byteLength(context) > CONTEXT_LIMIT) die(`the context is over ${CONTEXT_LIMIT / 1024} KB; keep it to what a new agent needs`);
+  }
+  const label = agentLabel(values.by);
+  const now = Math.floor(Date.now() / 1000);
 
   const item = {
     id: newId(),
@@ -228,16 +260,20 @@ function cmdAdd(args) {
     for: values.for || "",
     addedBy: values.by || agentName(),
     workspace: workspaceLabel(),
+    agent: agentName(),
+    session: sessionId(),
     pane: process.env.HERDR_PANE_ID || "",
     cwd: process.cwd(),
-    created: Math.floor(Date.now() / 1000),
-    status: "open",
-    takenBy: null,
-    takenAt: null,
+    created: now,
+    status: values.session ? "reserved" : "open",
+    takenBy: values.session ? label : null,
+    takenAt: values.session ? now : null,
+    hasContext: Boolean(context),
     doneAt: null,
   };
+  if (context) writeAtomic(contextFile(item.id), context + "\n");
   saveItem(item);
-  console.log(`added ${item.id}  ${item.text}  [${item.project}]`);
+  console.log(`added ${item.id}  ${item.text}  [${item.project}]${values.session ? `  reserved for ${label} (this session)` : ""}${context ? "  (with context)" : ""}`);
 
   if (inHerdr()) {
     herdr(["notification", "show", `Later · ${item.project}`, "--body",
@@ -268,9 +304,14 @@ function cmdStatus(args, status) {
 function printItem(i) {
   console.log(`${i.id}  ${i.text}`);
   console.log(`  project: ${i.project}    folder: ${i.cwd}`);
-  console.log(`  status: ${i.status === "progress" ? `in progress · ${i.takenBy} (taken ${ago(i.takenAt)})` : i.status}${i.for ? `    for: ${i.for}` : ""}`);
+  const status = i.status === "progress" ? `in progress · ${i.takenBy} (taken ${ago(i.takenAt)})`
+    : i.status === "reserved" ? `reserved · ${i.takenBy} (this session)` : i.status;
+  console.log(`  status: ${status}${i.for ? `    for: ${i.for}` : ""}`);
   console.log(`  added by: ${[i.addedBy, i.workspace].filter(Boolean).join(" · ")}, ${ago(i.created)}`);
   if (i.note) console.log(`  brief: ${i.note}`);
+  if (i.session) console.log(`  session: ${i.session}${i.agent === "claude" ? `   (resume: claude --resume ${i.session})` : ""}`);
+  const context = readContext(i.id);
+  if (context) console.log(`\n--- context ---\n${context}\n---------------`);
 }
 
 function cmdShow(args) {
@@ -289,6 +330,7 @@ function cmdTake(args) {
     const i = resolve(id);
     if (i.status === "done") return { refused: `${i.id} is already done` };
     if (i.status === "progress" && i.takenBy !== label) return { refused: `${i.id} is in progress · ${i.takenBy} (taken ${ago(i.takenAt)})` };
+    if (i.status === "reserved" && i.takenBy !== label) return { refused: `${i.id} is reserved for ${i.takenBy} (its session)` };
     i.status = "progress";
     i.takenBy = label;
     i.takenAt = Math.floor(Date.now() / 1000);
@@ -327,6 +369,7 @@ function cmdRm(args) {
   for (const ref of args) {
     const item = resolve(ref);
     fs.rmSync(path.join(ITEMS, `${item.id}.json`), { force: true });
+    fs.rmSync(contextFile(item.id), { force: true });
     console.log(`removed ${item.id}`);
   }
 }
@@ -346,7 +389,7 @@ function cmdList(args) {
     (!project || i.project === project) &&
     (!values.available || (i.status === "open" && isMine(i, label))));
 
-  if (values.json) return console.log(JSON.stringify(items, null, 2));
+  if (values.json) return console.log(JSON.stringify(items.map((i) => ({ ...i, context: i.hasContext ? readContext(i.id) : "" })), null, 2));
   if (items.length === 0) return console.log(values.available ? "nothing available for you" : "nothing for later");
 
   let last = null;
@@ -357,8 +400,9 @@ function cmdList(args) {
       last = i.project;
     }
     const where = [i.addedBy, i.workspace, age(i.created)].filter(Boolean).join(" · ");
-    const box = i.status === "done" ? "[x]" : i.status === "progress" ? "[~]" : "[ ]";
-    const state = [i.status === "progress" ? `in progress · ${i.takenBy}` : "", i.for ? `for ${i.for}` : ""].filter(Boolean).join(", ");
+    const box = { done: "[x]", progress: "[~]", reserved: "[r]" }[i.status] || "[ ]";
+    const state = [i.status === "progress" ? `in progress · ${i.takenBy}` : "", i.status === "reserved" ? `reserved · ${i.takenBy} (this session)` : "",
+      i.for ? `for ${i.for}` : "", i.hasContext ? "context" : ""].filter(Boolean).join(", ");
     console.log(`  ${box} ${i.id}  ${i.text}  (${where})${state ? `  [${state}]` : ""}`);
     if (i.note) console.log(`         ${i.note}`);
   }
@@ -386,7 +430,7 @@ function cmdPane() {
 
   function render() {
     const items = readItems();
-    const rank = { progress: 0, open: 1, done: 2 };
+    const rank = { reserved: 0, progress: 1, open: 2, done: 3 };
     const visible = items.filter((i) => showDone || i.status !== "done")
       .sort((a, b) => a.project.localeCompare(b.project) || rank[a.status] - rank[b.status] || a.created - b.created);
     const open = items.filter((i) => i.status !== "done").length;
@@ -406,10 +450,12 @@ function cmdPane() {
         last = i.project;
       }
       const selected = n === cursor;
-      const box = i.status === "done" ? `${C.green}☑${C.reset}` : i.status === "progress" ? `${C.yellow}◐${C.reset}` : "☐";
+      const box = i.status === "done" ? `${C.green}☑${C.reset}` : i.status === "progress" ? `${C.yellow}◐${C.reset}` : i.status === "reserved" ? `${C.yellow}◑${C.reset}` : "☐";
       const style = (i.status === "done" ? C.dim : "") + (selected ? C.bold : "");
       const where = [i.id, i.addedBy, i.workspace, age(i.created)].filter(Boolean).join(" · ")
         + (i.status === "progress" ? ` · in progress · ${i.takenBy} ${age(i.takenAt)}` : "")
+        + (i.status === "reserved" ? ` · reserved · ${i.takenBy}` : "")
+        + (i.hasContext ? " · context" : "")
         + (i.for ? ` · for ${i.for}` : "");
       lines.push(`${selected ? `${C.yellow}›${C.reset}` : " "} ${box} ${style}${cut(i.text, width)}${C.reset}`);
       lines.push(`      ${C.dim}${cut(where, width - 6)}${C.reset}`);
@@ -440,7 +486,7 @@ function cmdPane() {
     }
     if (str === "j" || key.name === "down") cursor++;
     else if (str === "k" || key.name === "up") cursor--;
-    else if (str === "u" && current && readItems().find((i) => i.id === current)?.status === "progress") setStatus(current, "open");
+    else if (str === "u" && current && ["progress", "reserved"].includes(readItems().find((i) => i.id === current)?.status)) setStatus(current, "open");
     else if ((str === "x" || key.name === "space") && current) {
       setStatus(current, readItems().find((i) => i.id === current)?.status === "done" ? "open" : "done");
     } else if (str === "d" && current) confirm = current;
@@ -626,7 +672,8 @@ function cmdUninstall() {
 function usage() {
   console.log(`later: the work you and your agents agreed to do later, in one list for every herdr workspace.
 
-  later add "text" [--project name] [--brief "what, where, done when"] [--for agent]
+  later add "text" [--project name] [--brief "…"] [--context-file file|-] [--session] [--for agent]
+                            --session: reserved for this agent's session; --context-file: a handoff for a new agent
   later list [--all] [--here | --project name] [--available] [--json]
   later show <id>           the whole item, with its brief
   later take <id> [--by n]  mark it in progress for this agent (refused if another agent has it)
