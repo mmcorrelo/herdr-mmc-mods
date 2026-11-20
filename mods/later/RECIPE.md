@@ -13,6 +13,9 @@ A panel on the right of the window with one shared list of the work you and your
 
 ## How it behaves
 
+- An item is compact until clicked: its text, "id · agent · tab · age", "≡ context" in the accent color when it has one, and its chips. Clicking it opens it in place (one at a time, on the raised color with a border): the context rendered as markdown (TextView.markdown), the brief when there is no context, the details (Project, Folder, Added, Session, Status, For), then the buttons and, with a context, "Open in a pane ↗" (`pane.split` right with this mod and props `{ view: "context", id }`, which renders only that item's context and details).
+- **Resume session** (items from Claude Code with a session id) runs `tab.new` with `argv: ["claude", "--resume", <session>]` in the item's folder and the item as the task.
+- A reserved item ("reserved · agent · this session", ansi6) belongs to the agent that added it for its own session; Unassign makes it open.
 - Clicking the box marks the item done or open again. "Show done" shows done items too. Clicking a group header closes or opens it; "Collapse all" / "Expand all" does every group. Closed groups are kept in localStorage, and a group opens by itself when one of its items is taken.
 - **Start agent** shows the installed agent programs (`knownAgents()`); picking one runs `tab.new` with the item's folder, the program's `run` argv, the tab name "Later <id>" and the task "Do later item <id>: … take it first, do the work, then mark it done".
 - **Send to…** shows the open agents (`agents()`, by tab name, busy ones marked); picking one runs `hc send --if idle <address> <task>`, so a working agent is never interrupted.

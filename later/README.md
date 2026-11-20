@@ -30,6 +30,15 @@ herdr plugin install mmcorrelo/herdr-mmc-mods/later
 
 Restart herdr, and it works. macOS, Linux and Windows; it needs Node.js 18 or later on your `PATH`.
 
+## This session or a new one
+
+When you defer something, the agent decides who does it, and asks you only when your words do not say:
+
+- **This session**: the agent will do it itself before the conversation ends. It adds the item with `--session`; the item is **reserved** for that agent and other agents skip it.
+- **A new session**: another agent will do it, so the agent writes a **context** for it (Goal, Why, Background, Where, Done when, Watch out) and saves it with the item (`--context-file`). It writes the context itself and asks you only for a decision that is missing.
+
+Each item from Claude Code also keeps the id of the session where it was added, so the desktop panel can **resume** that conversation.
+
 ## Agents doing the to-dos
 
 Tell an agent **"pick a to-do"**: it lists the open items of its repository, proposes one and says why, and takes it only after you say yes. Or name one: **"do later item 8a70"**. When it finishes it marks the item done; when it stops early it unassigns it.
@@ -74,7 +83,7 @@ Every line it adds ends with `# mmc.later`. If you remove them, they stay remove
 ## Commands
 
 ```
-later add "text" [--project name] [--brief "what, where, done when"] [--for agent] [--by name]
+later add "text" [--project name] [--brief "…"] [--context-file file|-] [--session] [--for agent] [--by name]
 later list [--all] [--here | --project name] [--available] [--json]
 later show <id>        later take <id> [--by name]     later unassign <id>...
 later done <id>...     later reopen <id>...            later rm <id>...
@@ -82,6 +91,6 @@ later copy <id>        later count                     later pane
 later setup            later uninstall
 ```
 
-`take` marks an item in progress for the agent that runs it and is refused when another agent already has it, so two agents never work on the same item (a lock makes this safe when they try at the same moment). `unassign` makes it open again. `list --available` shows the open items that are not assigned to another agent with `--for`.
+`take` marks an item in progress for the agent that runs it and is refused when another agent already has it, so two agents never work on the same item (a lock makes this safe when they try at the same moment). `unassign` makes it open again. `list --available` shows the open items that are not assigned to another agent with `--for`. `show` prints an item's context; `list --json` includes it. A context is a markdown file next to the item (`items/<id>.md`), at most 64 KB.
 
 An id can be shortened to any unique prefix. `LATER_HOME` moves the item folder, for example to try the mod without touching your list.
