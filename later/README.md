@@ -1,0 +1,80 @@
+# later
+
+A herdr mod: one shared list of the work you and your agents agreed to do **later**.
+
+This is the mod for the herdr terminal app. For the Herdr desktop app, use the mod in [`../mods/later`](../mods/later/RECIPE.md); both show the same list.
+
+While you talk to an agent, you often agree that something is for another day: a follow-up, technical debt, a separate change. `later` keeps those items in one list that every agent, in every herdr workspace, can add to, and shows it live next to your agents.
+
+```
+☐ Later  3 open · all workspaces
+
+web-app
+  ☐ Show the order history on the profile page
+      682d · claude · Frontend · 2h
+
+api-service
+› ☐ Write the migration for the orders table
+      3bc9 · claude · Backend · 1d
+  ☐ Cap JSON request bodies above 32 MB
+      ff63 · codex · Database · 5d
+
+j/k move · x done · d remove · a show done · q close
+```
+
+## Install
+
+```sh
+herdr plugin install mmcorrelo/herdr-mmc-mods/later
+```
+
+Restart herdr, and it works. macOS, Linux and Windows; it needs Node.js 18 or later on your `PATH`.
+
+## Use
+
+- **`prefix+t`** opens the list as a popup. Press `q` to close it.
+- The **"Later: open the list beside this pane"** action opens it as a split pane that stays open.
+- **`☐ 3 later`** in the tab bar shows the open count (see *What it sets up*).
+- Tell your agent "add that to later", or just agree to leave something for later: Claude Code and Codex agents know when to add an item.
+
+In the list: `j`/`k` or the arrows move, `x` marks done (or open again), `d` removes, `a` shows or hides done items, `q` closes.
+
+## How it works
+
+1. You and an agent agree to do something later.
+2. The agent runs `later add "…"`. Its skill tells it when.
+3. The item is saved as one small JSON file in this plugin's herdr config folder (`herdr plugin config-dir mmc.later`, then `items/`). One file per item, so two agents can add at the same time.
+4. The list watches the folder and redraws at once. herdr shows a notification with the item and who added it.
+
+An item's project is the git repository the agent works in, so the list groups itself by project.
+
+## What it sets up
+
+Each time herdr starts, the mod makes sure that:
+
+- a stable copy of the command is in its config folder, so agents can call it with a path that does not change when the mod updates
+- the agent skill is in `~/.claude/skills/later/` (Claude Code) and `~/.codex/skills/later/` (Codex), for the ones you have installed
+- a `later` command is in `~/.local/bin` or `~/bin`, when one of them is on your `PATH`
+
+The **first** time only, it adds to herdr's `config.toml`, backing the file up as `config.toml.bak-later` and restoring it if herdr does not accept the result:
+
+- `prefix+t` for the popup, unless you already use that key
+- the tab bar counter, if your tab bar's right side is still empty; otherwise it prints the entry to add yourself:
+
+  ```toml
+  { type = "command", command = 'later count', interval_seconds = 10, timeout_seconds = 3 }
+  ```
+
+Every line it adds ends with `# mmc.later`. If you remove them, they stay removed; the **"Later: set up this computer again"** action adds them back. The **"Later: undo the setup"** action removes the lines, the skills and the command. Your items stay.
+
+## Commands
+
+```
+later add "text" [--project name] [--note "why"] [--by name]
+later list [--all] [--here | --project name] [--json]
+later done <id>...     later reopen <id>...     later rm <id>...
+later count            later pane
+later setup            later uninstall
+```
+
+An id can be shortened to any unique prefix. `LATER_HOME` moves the item folder, for example to try the mod without touching your list.

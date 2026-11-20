@@ -1,0 +1,40 @@
+# Later
+
+A panel on the right of the window with one shared list of the work you and your agents agreed to do later. Any agent in any space adds an item with the `later` command; the panel shows it at once, grouped by project, and posts a notification.
+
+![Later](preview.png)
+
+## What you see
+
+- **Header**, 42px: "Later", a small bordered badge "N open", and "Show done" / "Hide done" on the right in the muted color.
+- **List**, scrolling: one group per project (the git repository the agent worked in), its name in the accent color with "N open" in the dim color. Each item is a row: a ☐ box (☑ in ansi2 green when done), the text (dim and struck through when done), the note in 11px muted text when there is one, and "id · agent · space · age" in 11px dim text. A × on the right removes the item after "Remove / Keep".
+- **Empty**: "Nothing for later. When you and an agent agree to do something later, it appears here."
+- The panel is 320px wide, docked on the right, with the theme's background, border and 10px corners like the Changes panel.
+
+## How it behaves
+
+- Clicking the box marks the item done or open again. "Show done" shows done items too.
+- A new item from any agent appears within a moment and posts a notification "Later · <project>".
+- Ages ("now", "5m", "2h", "3d") refresh every minute.
+- `cmd-shift-t` shows or hides the panel (`layout.toggle:later`).
+
+## Built from
+
+- `main.js`: one View. Every read and write runs `node bin/later.mjs <command>` with `exec`: `ensure` once at start (it installs the agent skill for Claude Code and Codex), `where` for the item folder, `list --all --json` to load, `done`, `reopen`, `rm`. It reloads after `watchFolder(<item folder>)` resolves.
+- `bin/later.mjs`: the command itself, Node built-ins only. Items are one JSON file each in herdr's plugin config folder for `mmc.later` (`~/.config/herdr/plugins/config/mmc.later/items/`), shared with the terminal plugin of the same name.
+- `skill/SKILL.md`: the agent skill template; `ensure` fills in the command's path.
+- `mod.json`: `{ "place": "right", "size": 320, "title": "Later" }`. `keys.json`: `cmd-shift-t` → `layout.toggle:later`.
+
+## Watch out
+
+- The app may run programs without an interactive shell's PATH, where nvm puts node. `findNode` tries `node`, then `zsh` / `bash` / `fish -ilc "command -v node"`, then Homebrew, `/usr/local`, Volta and the newest nvm version, and keeps the one that answers in localStorage.
+- The app docks a new mod under a random node id. The shortcut needs the id `later`, so after the dock, rename that node's id to `later` in the layout file (the repository's `install-desktop.mjs` does this).
+- The mod runs programs (`node`, the login shells) and reads a folder outside its own (the item folder in `~/.config/herdr/plugins/config/mmc.later/`). It does not reach the network.
+
+## Done when
+
+- `herdr-app check mods/later` passes.
+- `later add "test"` in any terminal shows the item in the panel within a second, with a notification.
+- Clicking the box marks it done; "Show done" shows it struck through; × then "Remove" deletes its file.
+- `cmd-shift-t` hides and shows the panel.
+- With no Node installed, the panel says "Later needs Node.js 18 or later…".

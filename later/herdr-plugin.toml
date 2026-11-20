@@ -1,0 +1,39 @@
+id = "mmc.later"
+name = "Later"
+version = "0.2.0"
+min_herdr_version = "0.9.0"
+description = "One shared list of the work you and your agents agreed to do later. Any agent in any workspace adds to it; a pane and a popup show it live."
+platforms = ["macos", "linux", "windows"]
+
+# Node built-ins only, no build step. Needs Node 18 or later on PATH.
+
+# Keeps the command, the agent skills and the stable copy current on every
+# start, and adds prefix+t (plus the tab bar counter when the tab bar's right
+# side is free) to config.toml the first time only.
+[[startup]]
+command = ["node", "bin/later.mjs", "ensure"]
+
+[[panes]]
+id = "list"
+title = "Later"
+description = "The live list of deferred work, grouped by project"
+placement = "split"
+command = ["node", "bin/later.mjs", "pane"]
+
+[[actions]]
+id = "open"
+title = "Later: open the list beside this pane"
+contexts = ["global", "workspace", "pane"]
+command = ["node", "bin/later.mjs", "open-pane"]
+
+[[actions]]
+id = "setup"
+title = "Later: set up this computer again (config.toml included)"
+contexts = ["global"]
+command = ["node", "bin/later.mjs", "setup"]
+
+[[actions]]
+id = "uninstall"
+title = "Later: undo the setup (your items stay)"
+contexts = ["global"]
+command = ["node", "bin/later.mjs", "uninstall"]
