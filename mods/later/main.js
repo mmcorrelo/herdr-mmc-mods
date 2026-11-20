@@ -1,6 +1,6 @@
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar } from "gpui-base";
-import { exec, hc, run, agents, knownAgents, watchFolder, notify, appHome, home, theme } from "herdr";
+import { v_flex, h_flex, Scrollbar, TextView } from "gpui-base";
+import { exec, hc, run, agents, knownAgents, watchFolder, notify, appHome, home, theme, props } from "herdr";
 
 // Every read and write goes through the later command, the same one the agents
 // and the herdr TUI plugin use, so all of them share one list.
@@ -56,6 +56,8 @@ function age(epoch) {
 
 export default class Later extends View {
   init(_props, cx) {
+    this.view = props()?.view === "context" ? props().id : null;
+    this.openId = null;
     this.items = [];
     this.known = null;
     this.showDone = false;
@@ -79,7 +81,7 @@ export default class Later extends View {
       }
       try { localStorage.setItem("node", this.node); } catch {}
       try {
-        const setup = await this.later(["ensure"]);
+        const setup = await this.later([this.view ? "where" : "ensure"]);
         if (setup.code !== 0) throw new Error(setup.stderr.trim() || "the later command failed");
         this.folder = (await this.later(["where"])).stdout.trim();
       } catch (e) {
@@ -110,11 +112,11 @@ export default class Later extends View {
       const r = await this.later(["list", "--all", "--json"]);
       if (r.code !== 0) throw new Error(r.stderr.trim());
       const items = JSON.parse(r.stdout);
-      if (this.known) {
+      if (this.known && !this.view) {
         for (const i of items) {
           const was = this.known.get(i.id);
           if (!was) notify({ title: `Later · ${i.project}`, body: `${i.text} (from ${i.addedBy})`, level: "info", timeout: 6000 });
-          else if (was !== "progress" && i.status === "progress") notify({ title: `Taken · ${i.project}`, body: `${i.text} (${i.takenBy})`, level: "info", timeout: 5000 });
+          else if (was === "open" && i.status === "progress") notify({ title: `Taken · ${i.project}`, body: `${i.text} (${i.takenBy})`, level: "info", timeout: 5000 });
         }
       }
       for (const i of items) if (i.status === "progress" && this.known?.get(i.id) !== "progress") this.expand(i.project);
@@ -166,6 +168,16 @@ export default class Later extends View {
     });
   }
 
+  resume(i) {
+    this.picker = null;
+    run("tab.new", { name: `Resume ${i.session.slice(0, 8)}`, folder: i.cwd || undefined, argv: ["claude", "--resume", i.session], task: taskFor(i) });
+    notify({ title: "Resumed the original session", body: `Later ${i.id}: ${i.text}`, level: "info", timeout: 5000 });
+  }
+
+  openPane(i) {
+    run("pane.split", { direction: "right", mod: "later", props: { view: "context", id: i.id } });
+  }
+
   copy(i, cx) {
     cx.spawn(async (cx) => {
       const r = await this.later(["copy", i.id]);
@@ -200,31 +212,67 @@ export default class Later extends View {
         : [div().text_size(11).text_color(t.dim).child("No agents are open")]));
   }
 
+  details(i, t) {
+    const kv = (k, v, mono) => h_flex().gap(8).items_start().text_size(11.5)
+      .child(div().w(62).flex_none().text_color(t.dim).child(k))
+      .child(div().flex_1().min_w(0).text_color(t.muted).when(Boolean(mono), (e) => e.font_family("JetBrains Mono").text_size(11)).child(v));
+    const status = i.status === "progress" ? `in progress · ${i.takenBy}, ${age(i.takenAt)} ago`
+      : i.status === "reserved" ? `reserved · ${i.takenBy} (this session)` : i.status;
+    return v_flex().gap(2).pt(6).border_t(1).border_color(t.border)
+      .child(kv("Project", i.project))
+      .when(Boolean(i.cwd), (e) => e.child(kv("Folder", i.cwd.replace(home(), "~"), true)))
+      .child(kv("Added", `${[i.addedBy, i.workspace].filter(Boolean).join(" · ")}, ${age(i.created)} ago`))
+      .when(Boolean(i.session), (e) => e.child(kv("Session", `${i.session.slice(0, 8)}…`, true)))
+      .child(kv("Status", status))
+      .when(Boolean(i.for), (e) => e.child(kv("For", i.for)));
+  }
+
+  context(i, t, id) {
+    if (i.context) return div().w_full().text_size(12.5).text_color(t.foreground).child(TextView.markdown(id, i.context).selectable(true));
+    if (i.note) return div().pl(8).border_l(2).border_color(t.border).text_size(12).text_color(t.muted).child(i.note);
+    return null;
+  }
+
   row(i, t) {
     const done = i.status === "done";
-    const taken = i.status === "progress";
-    const stale = taken && Math.floor(Date.now() / 1000) - i.takenAt > STALE_SECONDS;
+    const busy = i.status === "progress" || i.status === "reserved";
+    const open = this.openId === i.id;
+    const stale = i.status === "progress" && Math.floor(Date.now() / 1000) - i.takenAt > STALE_SECONDS;
     const asking = this.confirm === i.id;
-    const meta = [i.id, i.addedBy, i.workspace, age(i.created)].filter(Boolean).join(" · ");
     const pick = (kind) => (_e, cx) => { this.picker = this.picker?.id === i.id && this.picker.kind === kind ? null : { id: i.id, kind }; cx.notify(); };
     const chips = [];
-    if (taken) chips.push(this.chip(`in progress · ${i.takenBy}`, t.blocked, t));
+    if (i.status === "progress") chips.push(this.chip(`in progress · ${i.takenBy}`, t.blocked, t));
+    if (i.status === "reserved") chips.push(this.chip(`reserved · ${i.takenBy} · this session`, t.ansi6, t));
     if (stale) chips.push(this.chip(`taken ${age(i.takenAt)} ago`, t.ansi1, t));
-    if (i.for && !done && !taken) chips.push(this.chip(`for ${i.for}`, t.ansi5, t));
-    const actions = done ? [] : taken
-      ? [this.button(`later-unassign-${i.id}`, "Unassign", t, (_e, cx) => this.act(["unassign", i.id], cx)), this.button(`later-copy-${i.id}`, "Copy id", t, (_e, cx) => this.copy(i, cx))]
-      : [this.button(`later-startbtn-${i.id}`, "Start agent", t, pick("start")), this.button(`later-sendbtn-${i.id}`, "Send to…", t, pick("send")), this.button(`later-copy-${i.id}`, "Copy id", t, (_e, cx) => this.copy(i, cx))];
+    if (i.for && i.status === "open") chips.push(this.chip(`for ${i.for}`, t.ansi5, t));
+    const actions = [];
+    if (i.status === "open") actions.push(this.button(`later-startbtn-${i.id}`, "Start agent", t, pick("start")), this.button(`later-sendbtn-${i.id}`, "Send to…", t, pick("send")));
+    if (!done && i.session && i.agent === "claude") actions.push(this.button(`later-resume-${i.id}`, "Resume session", t, () => this.resume(i)));
+    if (busy) actions.push(this.button(`later-unassign-${i.id}`, "Unassign", t, (_e, cx) => this.act(["unassign", i.id], cx)));
+    if (!done) actions.push(this.button(`later-copy-${i.id}`, "Copy id", t, (_e, cx) => this.copy(i, cx)));
+    const body = this.context(i, t, `later-ctx-${i.id}`);
 
-    return h_flex().id(`later-${i.id}`).flex_none().px(8).py(6).gap(8).items_start().rounded(7).hover((s) => s.bg(t.hover))
-      .child(div().id(`later-box-${i.id}`).w(16).flex_none().cursor_pointer().text_color(done ? t.ansi2 : taken ? t.blocked : t.muted)
-        .on_click((_e, cx) => this.act([done ? "reopen" : "done", i.id], cx)).child(done ? "☑" : taken ? "◐" : "☐"))
+    return h_flex().id(`later-${i.id}`).flex_none().px(8).py(6).gap(8).items_start().rounded(7).border_1()
+      .border_color(open ? t.border : t.background).when(open, (e) => e.bg(t.raised)).when(!open, (e) => e.hover((s) => s.bg(t.hover)))
+      .child(div().id(`later-box-${i.id}`).w(16).flex_none().cursor_pointer().text_color(done ? t.ansi2 : i.status === "reserved" ? t.ansi6 : busy ? t.blocked : t.muted)
+        .on_click((_e, cx) => { cx.stop_propagation(); this.act([done ? "reopen" : "done", i.id], cx); }).child(done ? "☑" : i.status === "progress" ? "◐" : i.status === "reserved" ? "◑" : "☐"))
       .child(v_flex().flex_1().min_w(0).gap(2)
-        .child(div().text_color(done ? t.dim : t.foreground).when(done, (e) => e.line_through()).child(i.text))
-        .when(Boolean(i.note) && !done, (e) => e.child(div().pl(8).border_l(2).border_color(t.border).text_size(11.5).text_color(t.muted).child(i.note)))
-        .child(div().text_size(11).text_color(t.dim).truncate().child(meta))
-        .when(chips.length > 0, (e) => e.child(h_flex().gap(4).flex_wrap().children(chips)))
-        .when(actions.length > 0, (e) => e.child(h_flex().gap(3).flex_wrap().pt(2).children(actions)))
-        .children([this.pickerRow(i, t)].filter(Boolean)))
+        .child(v_flex().id(`later-hit-${i.id}`).gap(2).cursor_pointer()
+          .on_click((_e, cx) => { this.openId = open ? null : i.id; this.picker = null; cx.notify(); })
+          .child(div().text_color(done ? t.dim : t.foreground).when(done, (e) => e.line_through()).child(i.text))
+          .child(h_flex().gap(6).text_size(11).text_color(t.dim)
+            .child(div().truncate().child([i.id, i.addedBy, i.workspace, age(i.created)].filter(Boolean).join(" · ")))
+            .when(Boolean(i.context), (e) => e.child(div().flex_none().text_color(t.accent).child("≡ context"))))
+          .when(chips.length > 0, (e) => e.child(h_flex().gap(4).flex_wrap().children(chips))))
+        .when(open, (e) => e.child(v_flex().gap(8).pt(6)
+          .children([body].filter(Boolean))
+          .child(this.details(i, t))
+          .children([this.pickerRow(i, t)].filter(Boolean))
+          .child(h_flex().gap(3).flex_wrap().items_center().pt(6).border_t(1).border_color(t.border)
+            .children(actions)
+            .child(div().flex_1())
+            .when(Boolean(i.context), (e) => e.child(div().id(`later-pane-${i.id}`).cursor_pointer().text_size(11).text_color(t.accent)
+              .on_click(() => this.openPane(i)).child("Open in a pane ↗")))))))
       .child(asking
         ? h_flex().flex_none().gap(6).text_size(11)
           .child(div().id(`later-yes-${i.id}`).cursor_pointer().text_color(t.ansi1).on_click((_e, cx) => { this.confirm = null; this.act(["rm", i.id], cx); }).child("Remove"))
@@ -233,9 +281,28 @@ export default class Later extends View {
           .on_click((_e, cx) => { this.confirm = i.id; cx.notify(); }).child("×"));
   }
 
+  viewer(t) {
+    const i = this.items.find((x) => x.id === this.view);
+    return v_flex().id("later-viewer").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
+      .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
+        .child(div().font_semibold().child("Context"))
+        .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`later ${this.view}`))
+        .child(div().flex_1()))
+      .child(div().flex_1().min_h(0).relative()
+        .child(v_flex().id("later-viewer-body").absolute().inset_0().overflow_y_scroll().px(20).py(16).gap(10)
+          .child(!i
+            ? div().text_color(t.dim).child(this.loading ? "Loading…" : this.problem || "This item is gone.")
+            : v_flex().gap(10)
+              .child(div().text_size(17).font_semibold().child(i.text))
+              .children([this.context(i, t, `later-viewer-ctx-${i.id}`)].filter(Boolean))
+              .child(this.details(i, t))))
+        .child(Scrollbar.vertical("later-viewer-body").absolute().inset_0()));
+  }
+
   render(cx) {
     const t = theme();
-    const rank = { progress: 0, open: 1, done: 2 };
+    if (this.view) return this.viewer(t);
+    const rank = { reserved: 0, progress: 1, open: 2, done: 3 };
     const open = this.items.filter((i) => i.status !== "done").length;
     const shown = this.items.filter((i) => this.showDone || i.status !== "done")
       .sort((a, b) => a.project.localeCompare(b.project) || rank[a.status] - rank[b.status] || a.created - b.created);
@@ -266,7 +333,7 @@ export default class Later extends View {
           .children(groups.map((g) => {
             const closed = this.collapsed.has(g.project);
             const gOpen = g.items.filter((i) => i.status !== "done").length;
-            const gTaken = g.items.filter((i) => i.status === "progress").length;
+            const gTaken = g.items.filter((i) => i.status === "progress" || i.status === "reserved").length;
             return v_flex().flex_none().gap(2).pb(4)
               .child(h_flex().id(`later-group-${g.project}`).px(8).py(4).gap(6).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
                 .on_click((_e, cx) => { this.toggleGroup(g.project); cx.notify(); })
